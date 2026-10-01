@@ -192,8 +192,10 @@ void PsolaShifter::run_pitch_detection() {
         }
     }
     const float aperiodic = d[tau];
-    // 息まじりの声や声の終わりも拾えるよう、判定はやや甘め（一度有声になったら外れにくく）
-    constexpr double kMinRms = 0.0015; // 約 -56dBFS（2.4kHz 以下）
+    // 息まじりの声や声の終わりも拾えるよう、判定はやや甘め（一度有声になったら外れにくく）。
+    // 音量の下限はごく小さくしておく：小さい声やマイクから遠い声を無声音と間違えると、
+    // その部分だけ高さが変わらず地声が漏れるため。雑音や無音は周期性（aperiodic）の判定で弾かれる
+    constexpr double kMinRms = 0.0001; // 約 -80dBFS（2.4kHz 以下）
     const bool is_voiced = rms > kMinRms && aperiodic < (voiced_ ? 0.45f : 0.3f);
     if (!is_voiced) {
         // 声の終わりや息まじりの所で一瞬だけ判定が外れても、しばらくは直前の高さのまま有声として扱う

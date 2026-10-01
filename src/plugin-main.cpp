@@ -22,6 +22,7 @@ OBS_MODULE_USE_DEFAULT_LOCALE("HKPitch", "en-US")
 #define T_(s) obs_module_text(s)
 
 #define S_PAKITTO "pakitto"
+#define S_HAKKIRI "hakkiri"
 #define S_PRESET "preset"
 #define S_PITCH "pitch"
 #define S_FORMANT "formant"
@@ -62,7 +63,7 @@ struct Filter {
     pf::ShifterParams params;
     pf::PsolaShifter ch[kMaxChannels];
     pf::ThreeBandEq eq[kMaxChannels]; // 「ぱきっと」用の前処理
-    bool pakitto = false;
+    float mid_gain = 1.0f; // 前処理の 3 バンドイコライザの中域の倍率（1 なら前処理なし）
     bool follows_ch0[kMaxChannels] = {}; // 直前まで 0 番と同じ音だったので処理を省いたチャンネル
     uint64_t last_ts = 0;
 };
@@ -91,7 +92,10 @@ void pf_update(void *data, obs_data_t *s) {
     p.formant_ratio = (float)std::pow(2.0, obs_data_get_double(s, S_FORMANT) / 12.0);
     p.mix = (float)(obs_data_get_double(s, S_MIX) / 100.0);
     p.gain = (float)std::pow(10.0, obs_data_get_double(s, S_GAIN) / 20.0);
+    // ぱきっと＝中域を 0 倍（OBS の 3 バンドの最小 -20dB よりさらに深く）、はっきり＝中域 -10dB
     const bool pakitto = obs_data_get_bool(s, S_PAKITTO);
+    const bool hakkiri = obs_data_get_bool(s, S_HAKKIRI);
+    const float mid_gain = pakitto ? 0.0f : hakkiri ? (float)std::pow(10.0, -10.0 / 20.0) : 1.0f;
 
     std::lock_guard<std::mutex> lock(f->mtx);
     if (sr != f->sample_rate || chs != f->channels || quality != f->quality) {
@@ -101,7 +105,7 @@ void pf_update(void *data, obs_data_t *s) {
         init_shifters(f);
     }
     f->params = p;
-    f->pakitto = pakitto;
+    f->mid_gain = mid_gain;
     for (size_t c = 0; c < f->channels; ++c)
         f->ch[c].set_params(p);
 }
@@ -132,14 +136,14 @@ obs_audio_data *pf_filter_audio(void *data, obs_audio_data *audio) {
     }
     f->last_ts = audio->timestamp;
 
-    // 「ぱきっと」：3 バンドイコライザで中域（800Hz〜5kHz）を完全に消してから処理する
-    if (f->pakitto) {
+    // 「ぱきっと」「はっきり」：3 バンドイコライザで中域（800Hz〜5kHz）を下げてから処理する
+    if (f->mid_gain < 1.0f) {
         for (size_t c = 0; c < f->channels; ++c) {
             auto *d = reinterpret_cast<float *>(audio->data[c]);
             if (!d)
                 continue;
             for (uint32_t i = 0; i < frames; ++i)
-                d[i] = f->eq[c].process(d[i], 1.0f, 0.0f, 1.0f);
+                d[i] = f->eq[c].process(d[i], 1.0f, f->mid_gain, 1.0f);
         }
     }
 
@@ -184,12 +188,30 @@ obs_audio_data *pf_filter_audio(void *data, obs_audio_data *audio) {
 
 void pf_defaults(obs_data_t *s) {
     obs_data_set_default_bool(s, S_PAKITTO, true);
+    obs_data_set_default_bool(s, S_HAKKIRI, false);
     obs_data_set_default_int(s, S_PRESET, 0);
     obs_data_set_default_double(s, S_PITCH, 0.0);
     obs_data_set_default_double(s, S_FORMANT, 0.0);
     obs_data_set_default_int(s, S_QUALITY, kQuality);
     obs_data_set_default_double(s, S_MIX, 100.0);
     obs_data_set_default_double(s, S_GAIN, 0.0);
+}
+
+// ぱきっととはっきりは片方だけ。オンにした方を残して、もう片方を切る
+bool pakitto_changed(obs_properties_t *, obs_property_t *, obs_data_t *s) {
+    if (obs_data_get_bool(s, S_PAKITTO) && obs_data_get_bool(s, S_HAKKIRI)) {
+        obs_data_set_bool(s, S_HAKKIRI, false);
+        return true;
+    }
+    return false;
+}
+
+bool hakkiri_changed(obs_properties_t *, obs_property_t *, obs_data_t *s) {
+    if (obs_data_get_bool(s, S_HAKKIRI) && obs_data_get_bool(s, S_PAKITTO)) {
+        obs_data_set_bool(s, S_PAKITTO, false);
+        return true;
+    }
+    return false;
 }
 
 bool preset_changed(obs_properties_t *, obs_property_t *, obs_data_t *s) {
@@ -207,6 +229,10 @@ obs_properties_t *pf_properties(void *) {
 
     obs_property_t *pk = obs_properties_add_bool(props, S_PAKITTO, T_("HKPitch.Pakitto"));
     obs_property_set_long_description(pk, T_("HKPitch.Pakitto.Help"));
+    obs_property_set_modified_callback(pk, pakitto_changed);
+    obs_property_t *hk = obs_properties_add_bool(props, S_HAKKIRI, T_("HKPitch.Hakkiri"));
+    obs_property_set_long_description(hk, T_("HKPitch.Hakkiri.Help"));
+    obs_property_set_modified_callback(hk, hakkiri_changed);
 
     obs_property_t *preset = obs_properties_add_list(props, S_PRESET, T_("HKPitch.Preset"), OBS_COMBO_TYPE_LIST,
                                                      OBS_COMBO_FORMAT_INT);

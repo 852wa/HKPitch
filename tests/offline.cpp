@@ -642,6 +642,36 @@ void test_onset() {
     check(worst_all < 40, msg);
 }
 
+void test_quiet() {
+    std::printf("\n■ 小さい声・マイクから遠い声でも地声が漏れないか（狙いの高さからのずれ。地声が漏れると数百セントずれる）\n");
+    const int sr = 48000;
+    const double fm[3] = {600, 1100, 2400};
+    std::mt19937 rng(11);
+    for (double f0 : {110.0, 140.0}) {
+        auto base = make_live_vowel(sr, 3.0, f0, fm, 1.0, 1.0);
+        double in_rms, in_p95;
+        pitch_wobble(base, sr, f0, 1.0, &in_rms, &in_p95);
+        // 声の大きさ（RMS）を指定の dBFS にそろえ、そこから 25dB 小さい雑音を足す
+        const double base_rms = rms(base, 0, base.size());
+        for (double level_db : {-30.0, -50.0, -65.0}) {
+            const double gain = std::pow(10.0, level_db / 20.0) / base_rms;
+            std::normal_distribution<float> nd(0.0f, (float)std::pow(10.0, (level_db - 25.0) / 20.0));
+            std::vector<float> x(base.size());
+            for (size_t i = 0; i < x.size(); ++i)
+                x[i] = (float)(base[i] * gain) + nd(rng);
+            int lat = 0;
+            auto y = run(x, sr, 5, 2, kPsola, &lat);
+            y.erase(y.begin(), y.begin() + lat);
+            y.resize(x.size(), 0.0f);
+            double r, p;
+            pitch_wobble(y, sr, f0, std::pow(2.0, 5 / 12.0), &r, &p);
+            char msg[200];
+            std::snprintf(msg, sizeof msg, "元 %.0fHz・声の大きさ %.0fdBFS を +5 半音: ずれ 平均 %.1f / 95%% %.1f セント", f0, level_db, r, p);
+            check(p < in_p95 * 1.3 + 15.0, msg);
+        }
+    }
+}
+
 void test_pakitto() {
     std::printf("\n■ ぱきっと：3 バンドイコライザで中域を消してから処理\n");
     const int sr = 48000;
@@ -664,6 +694,23 @@ void test_pakitto() {
             check(db > -3, msg);
         else
             std::printf("  [参考] %s 境目に近いので一部だけ残る\n", msg);
+    }
+    // はっきり（中域 -10dB）は、ぱきっとより浅く、元の音より深く下がるか
+    {
+        auto through = [&](float mid_gain, double hz) {
+            pf::ThreeBandEq eq;
+            eq.init(sr);
+            std::vector<float> x(sr / 2), y(sr / 2);
+            for (size_t i = 0; i < x.size(); ++i) {
+                x[i] = (float)(0.5 * std::sin(2 * kPi * hz * i / sr));
+                y[i] = eq.process(x[i], 1.0f, mid_gain, 1.0f);
+            }
+            return 20 * std::log10(rms(y, sr / 4, y.size()) / rms(x, sr / 4, x.size()) + 1e-12);
+        };
+        const double hk = through((float)std::pow(10.0, -10.0 / 20.0), 2000.0), pk = through(0.0f, 2000.0);
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "はっきり：2000Hz で %+.1f dB（ぱきっとは %+.1f dB）", hk, pk);
+        check(hk < -4.0 && hk > pk + 2.0, msg);
     }
     // 中域を消した声でも、ピッチは狙いどおりに変わるか
     const double fm[3] = {700, 1200, 2600};
@@ -727,6 +774,15 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "WAV を読めません: %s\n", argv[2]);
             return 1;
         }
+        // 最後の引数のどこかに pakitto があれば、OBS の「ぱきっと」と同じく中域を下げてから処理する
+        for (int a = 6; a < argc; ++a) {
+            if (!std::strcmp(argv[a], "pakitto")) {
+                pf::ThreeBandEq eq;
+                eq.init(sr);
+                for (auto &v : x)
+                    v = eq.process(v, 1.0f, 0.0f, 1.0f);
+            }
+        }
         Engine e = kPsola;
         if (argc >= 7 && !std::strcmp(argv[6], "pv"))
             e = kVocoder;
@@ -774,6 +830,8 @@ int main(int argc, char **argv) {
         test_wobble();
     if (want("onset"))
         test_onset();
+    if (want("quiet"))
+        test_quiet();
     if (want("pakitto"))
         test_pakitto();
     if (want("glide"))
